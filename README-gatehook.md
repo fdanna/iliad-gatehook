@@ -27,6 +27,17 @@ and `x-gatehook-env`. Edit those values and run `docker compose up -d`.
 - `WHITELIST_PATH` (default `/opt/gatehook/whitelist.txt`): allow-list file path.
 - `WHITELIST_TOGGLE_PATH` (default `/opt/gatehook/whitelist.enabled`): on/off file.
 
+### Telegram authorization
+- `TELEGRAM_BOT_TOKEN`: bot token (set in `.env`, never commit).
+- `TELEGRAM_CHAT_ID`: numeric chat id (preferred) or `@username`.
+- `TELEGRAM_TIMEOUT` (default `15`): seconds to wait for a decision.
+- `TELEGRAM_POLL_INTERVAL` (default `1`): poll interval in seconds.
+
+Notes:
+- The bot must be messaged at least once before it can send you notifications.
+- To discover your numeric chat id, send a message to the bot, then call:
+  `https://api.telegram.org/bot<token>/getUpdates`
+
 ## Whitelist files (editable at runtime)
 These files are mounted from `./scripts` and are read on every incoming call.
 No container restarts are needed for changes to take effect.

@@ -5,6 +5,7 @@ import socket
 import time
 import urllib.error
 import urllib.request
+import urllib.parse
 
 def env_bool(name, default=False):
     raw = os.environ.get(name)
@@ -56,9 +57,15 @@ WHITELIST_TOGGLE_PATH = os.environ.get(
 )
 SYSTEM_LOG_PATH = os.environ.get("SYSTEM_LOG_PATH", "/opt/gatehook/system.log")
 ACCESS_LOG_PATH = os.environ.get("ACCESS_LOG_PATH", "/opt/gatehook/access.log")
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+TELEGRAM_TIMEOUT = env_float("TELEGRAM_TIMEOUT", 15.0)
+TELEGRAM_POLL_INTERVAL = env_float("TELEGRAM_POLL_INTERVAL", 1.0)
+TELEGRAM_API_BASE = os.environ.get("TELEGRAM_API_BASE", "https://api.telegram.org")
 
 
 last_trigger = 0.0
+telegram_update_offset = None
 
 
 def log(message):
@@ -150,6 +157,157 @@ def trigger_shelly():
         log(f"shelly trigger response: status={resp.status} body={body}")
     except (urllib.error.URLError, urllib.error.HTTPError, OSError) as exc:
         log(f"shelly trigger failed: {exc}")
+
+
+def telegram_enabled():
+    return bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID)
+
+
+def telegram_api(method, data):
+    url = f"{TELEGRAM_API_BASE}/bot{TELEGRAM_BOT_TOKEN}/{method}"
+    encoded = urllib.parse.urlencode(data).encode("utf-8")
+    req = urllib.request.Request(url, data=encoded, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+        payload = json.loads(body)
+        if not payload.get("ok"):
+            log(f"telegram api error: {payload}")
+        return payload
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError, json.JSONDecodeError) as exc:
+        log(f"telegram api failed: {exc}")
+        return None
+
+
+def telegram_init_offset():
+    global telegram_update_offset
+    if not telegram_enabled():
+        return
+    payload = telegram_api("getUpdates", {"timeout": "0"})
+    if not payload or "result" not in payload:
+        return
+    updates = payload.get("result") or []
+    if updates:
+        telegram_update_offset = updates[-1].get("update_id", 0) + 1
+
+
+def telegram_chat_matches(message):
+    if not message:
+        return False
+    target = str(TELEGRAM_CHAT_ID).strip()
+    if not target:
+        return False
+    chat = message.get("chat", {}) if isinstance(message, dict) else {}
+    chat_id = chat.get("id")
+    if target.lstrip("-").isdigit():
+        return str(chat_id) == target
+    username = chat.get("username") or ""
+    if target.startswith("@"):
+        return username.lower() == target[1:].lower()
+    return username.lower() == target.lower()
+
+
+def telegram_wait_for_decision(request_id, timeout_seconds):
+    global telegram_update_offset
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        params = {"timeout": "0"}
+        if telegram_update_offset is not None:
+            params["offset"] = str(telegram_update_offset)
+        payload = telegram_api("getUpdates", params)
+        if payload and "result" in payload:
+            updates = payload.get("result") or []
+            for update in updates:
+                update_id = update.get("update_id")
+                if isinstance(update_id, int):
+                    telegram_update_offset = update_id + 1
+                callback = update.get("callback_query") or {}
+                data = callback.get("data") or ""
+                message = callback.get("message") or {}
+                if not data.startswith(f"gatehook:{request_id}:"):
+                    continue
+                if not telegram_chat_matches(message):
+                    continue
+                choice = data.split(":", 2)[-1]
+                callback_id = callback.get("id")
+                if callback_id:
+                    telegram_api(
+                        "answerCallbackQuery",
+                        {"callback_query_id": callback_id, "text": "Received"},
+                    )
+                return choice
+        time.sleep(TELEGRAM_POLL_INTERVAL)
+    return None
+
+
+def format_caller(caller):
+    if not caller:
+        return "unknown"
+    value = caller
+    if value.startswith("sip:"):
+        value = value[4:]
+    value = value.split(";", 1)[0]
+    if "@" in value:
+        value = value.split("@", 1)[0]
+    if value.startswith("00"):
+        return f"+{value[2:]}"
+    return value
+
+
+def telegram_notify(caller, origin):
+    request_id = os.urandom(6).hex()
+    display_caller = format_caller(caller)
+    text = (
+        "Incoming call from non-whitelisted number.\n"
+        f"Caller: {display_caller}\n"
+        "Authorize?"
+    )
+    keyboard = {
+        "inline_keyboard": [
+            [
+                {"text": "AUTHORIZE", "callback_data": f"gatehook:{request_id}:AUTH"},
+                {"text": "DECLINE", "callback_data": f"gatehook:{request_id}:DECLINE"},
+            ],
+            [
+                {
+                    "text": "AUTHORIZE AND ADD",
+                    "callback_data": f"gatehook:{request_id}:AUTH_ADD",
+                }
+            ],
+        ]
+    }
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": text,
+        "reply_markup": json.dumps(keyboard),
+    }
+    result = telegram_api("sendMessage", payload)
+    if not result or not result.get("ok"):
+        return None
+    return request_id
+
+
+def extract_origin(caller):
+    if not caller:
+        return "unknown"
+    value = caller
+    if value.startswith("sip:"):
+        value = value[4:]
+    if "@" in value:
+        value = value.split("@", 1)[1]
+    if ";" in value:
+        value = value.split(";", 1)[0]
+    return value or "unknown"
+
+
+def append_whitelist(caller):
+    try:
+        with open(WHITELIST_PATH, "a", encoding="utf-8") as handle:
+            handle.write(caller + "\n")
+        return True
+    except OSError as exc:
+        log(f"whitelist append failed: {exc}")
+        return False
 
 
 def send_hangup(sock):
@@ -258,7 +416,39 @@ def handle_message(sock, msg):
     allowed = load_whitelist()
     if allowed is not None and caller not in allowed:
         log(f"caller not allowed: {caller}")
+        if telegram_enabled():
+            origin = extract_origin(caller)
+            request_id = telegram_notify(caller, origin)
+            if request_id:
+                choice = telegram_wait_for_decision(request_id, TELEGRAM_TIMEOUT)
+                if choice == "AUTH":
+                    log(f"telegram authorized: {caller}")
+                    log_access("accepted", caller, "telegram_authorized")
+                    trigger_shelly()
+                    send_hangup(sock)
+                    return
+                if choice == "AUTH_ADD":
+                    added = append_whitelist(caller)
+                    log(f"telegram authorized and add: {caller} added={added}")
+                    log_access("accepted", caller, "telegram_authorized_added")
+                    trigger_shelly()
+                    send_hangup(sock)
+                    return
+                if choice == "DECLINE":
+                    log(f"telegram declined: {caller}")
+                    log_access("rejected", caller, "telegram_declined")
+                    send_hangup(sock)
+                    return
+                log(f"telegram timeout/no decision: {caller}")
+                log_access("rejected", caller, "telegram_timeout")
+                send_hangup(sock)
+                return
+            log("telegram notify failed; rejecting")
+            log_access("rejected", caller, "telegram_notify_failed")
+            send_hangup(sock)
+            return
         log_access("rejected", caller, "not_whitelisted")
+        send_hangup(sock)
         return
 
     log(f"incoming call from {caller}; triggering shelly")
@@ -305,6 +495,9 @@ if __name__ == "__main__":
     log("gatehook starting")
     log(f"access log path: {ACCESS_LOG_PATH}")
     log(f"system log path: {SYSTEM_LOG_PATH}")
+    if telegram_enabled():
+        log("telegram notifications enabled")
+    telegram_init_offset()
     if CTRL_SUBSCRIBE_COMMAND:
         log(
             "ctrl_tcp subscribe: "

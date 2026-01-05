@@ -7,3 +7,4 @@ baresip/
 
 # Docker artifacts
 **/__pycache__/
+.env
