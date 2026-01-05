@@ -44,7 +44,7 @@ services:
       test:
         [
           "CMD-SHELL",
-          "bash -c 'pgrep -x baresip >/dev/null'",
+          "pidof baresip >/dev/null",
         ]
       interval: 10s
       timeout: 3s
