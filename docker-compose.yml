@@ -1,0 +1,75 @@
+x-ctrl-env: &ctrl_env
+  # ctrl_tcp endpoint for gatehook to reach baresip
+  CTRL_HOST: 127.0.0.1
+  CTRL_PORT: "4444"
+
+x-gatehook-env: &gatehook_env
+  <<: *ctrl_env
+  # Shelly device control
+  SHELLY_URL: http://192.168.2.35/rpc/Switch.Set
+  SHELLY_TIMEOUT: "2"
+  # Gatehook behavior
+  DEBOUNCE_SECONDS: "2.0"
+  RECONNECT_DELAY: "2.0"
+  RECV_CHUNK: "4096"
+  # Whitelist controls (live reload)
+  WHITELIST_ENABLED: "0"
+  WHITELIST_PATH: /opt/gatehook/whitelist.txt
+  WHITELIST_TOGGLE_PATH: /opt/gatehook/whitelist.enabled
+
+services:
+  baresip:
+    image: ghcr.io/baresip/docker/baresip:latest
+    container_name: baresip
+    network_mode: "host"        # best for SIP/IPv6: no NAT, no port mapping
+    restart: unless-stopped
+    environment:
+      TZ: Europe/Rome
+      <<: *ctrl_env
+    volumes:
+      # Copy your existing ~/.baresip/* into ./baresip/
+      - ./baresip:/root/.baresip:rw
+
+      # Put your event script(s) here
+      - ./scripts:/opt/baresip:rw
+
+    # Repo examples run "baresip" explicitly for CLI options.  [oai_citation:1‡GitHub](https://github.com/baresip/docker)
+    command:
+      [
+        "sh",
+        "-c",
+        "baresip -v 2>&1 | tee -a /opt/baresip/system.log",
+      ]
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "bash -c 'pgrep -x baresip >/dev/null'",
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+  gatehook:
+    image: ghcr.io/fdanna/gatehook:latest
+    build:
+      context: .
+      dockerfile: gatehook/Dockerfile
+    container_name: gatehook
+    network_mode: "host"
+    restart: unless-stopped
+    environment:
+      <<: *gatehook_env
+    volumes:
+      - ./scripts:/opt/gatehook:rw
+    working_dir: /opt/gatehook
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import sys; cmd=open('/proc/1/cmdline','rb').read(); sys.exit(0 if b'gatehook.py' in cmd else 1)\"",
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s

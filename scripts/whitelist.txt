@@ -1,0 +1,6 @@
+# One caller ID per line. Examples:
+# sip:+393331234567@provider
+# sip:alice@example.com
+#
+# Enable or disable the whitelist by editing /opt/gatehook/whitelist.enabled
+sip:3397847521@voip.iliad.it;user=phone

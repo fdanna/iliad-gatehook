@@ -1,0 +1,9 @@
+# Logs
+*.log
+scripts/*.log
+
+# Local baresip runtime data (may include credentials)
+baresip/
+
+# Docker artifacts
+**/__pycache__/
