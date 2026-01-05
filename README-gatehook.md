@@ -52,6 +52,20 @@ No container restarts are needed for changes to take effect.
 - Restart baresip: `docker compose restart baresip`
 - Follow gatehook logs: `docker compose logs -f gatehook`
 - Follow baresip logs: `docker compose logs -f baresip`
+
+## GHCR Image
+The Gatehook image is published to GHCR as `ghcr.io/fdanna/gatehook`.
+
+### Authenticate to GHCR
+Use a GitHub PAT with `read:packages` (and `write:packages` if pushing).
+```bash
+echo "$GITHUB_TOKEN" | docker login ghcr.io -u fdanna --password-stdin
+```
+
+### Pull the Image
+```bash
+docker pull ghcr.io/fdanna/gatehook:latest
+```
 ## Testing
 
 ### Test Shelly Endpoint Manually
