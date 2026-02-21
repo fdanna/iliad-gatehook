@@ -3,4 +3,4 @@
 # sip:alice@example.com
 #
 # Enable or disable the whitelist by editing /opt/gatehook/whitelist.enabled
-sip:3397847521@voip.iliad.it;user=phone
+sip:123456789@voip.iliad.it;user=phone
