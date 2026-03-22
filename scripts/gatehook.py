@@ -2,6 +2,7 @@
 import json
 import os
 import socket
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -67,11 +68,23 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 TELEGRAM_TIMEOUT = env_float("TELEGRAM_TIMEOUT", 15.0)
 TELEGRAM_POLL_INTERVAL = env_float("TELEGRAM_POLL_INTERVAL", 1.0)
 TELEGRAM_API_BASE = os.environ.get("TELEGRAM_API_BASE", "https://api.telegram.org")
+WATCHDOG_ENABLED = env_bool("WATCHDOG_ENABLED", True)
+WATCHDOG_INTERVAL = env_float("WATCHDOG_INTERVAL", 30.0)
+WATCHDOG_FAIL_THRESHOLD = env_int("WATCHDOG_FAIL_THRESHOLD", 3)
+WATCHDOG_SCAN_LINES = env_int("WATCHDOG_SCAN_LINES", 400)
+WATCHDOG_STARTUP_GRACE = env_float("WATCHDOG_STARTUP_GRACE", 180.0)
+WATCHDOG_RESTART_COOLDOWN = env_float("WATCHDOG_RESTART_COOLDOWN", 600.0)
+WATCHDOG_TARGET_CONTAINER = os.environ.get("WATCHDOG_TARGET_CONTAINER", "baresip")
+DOCKER_SOCKET_PATH = os.environ.get("DOCKER_SOCKET_PATH", "/var/run/docker.sock")
 
 
 last_trigger = 0.0
 telegram_update_offset = None
 ROME_TZ = ZoneInfo("Europe/Rome")
+watchdog_started_at = time.monotonic()
+watchdog_last_restart = 0.0
+watchdog_log_offset = None
+watchdog_events = []
 
 
 def log(message):
@@ -95,6 +108,123 @@ def touch_log(path):
             pass
     except OSError:
         pass
+
+
+def read_new_lines(path, start_offset):
+    try:
+        with open(path, "rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            end_offset = handle.tell()
+            if start_offset is None or start_offset > end_offset:
+                return [], end_offset
+            handle.seek(start_offset)
+            text = handle.read(end_offset - start_offset).decode(
+                "utf-8", errors="replace"
+            )
+    except OSError as exc:
+        log(f"watchdog log read failed: {exc}")
+        return [], start_offset
+    return text.splitlines(), end_offset
+
+
+def docker_restart_container(container_name):
+    payload = (
+        f"POST /containers/{container_name}/restart?t=10 HTTP/1.1\r\n"
+        "Host: docker\r\n"
+        "Content-Length: 0\r\n"
+        "Connection: close\r\n\r\n"
+    ).encode("ascii")
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        sock.settimeout(10)
+        sock.connect(DOCKER_SOCKET_PATH)
+        sock.sendall(payload)
+        response = bytearray()
+        while True:
+            chunk = sock.recv(4096)
+            if not chunk:
+                break
+            response.extend(chunk)
+    finally:
+        sock.close()
+
+    header = response.split(b"\r\n", 1)[0].decode("utf-8", errors="replace")
+    if " 204 " in header or " 304 " in header:
+        return True, header
+    return False, header
+
+
+def parse_registration_events(lines):
+    events = []
+    for line in lines:
+        lowered = line.lower()
+        if "baresip v" in lowered:
+            events.append("startup")
+            continue
+        if "[1 binding]" in lowered or "register_ok" in lowered:
+            events.append("ok")
+            continue
+        if "connection timed out [110]" in lowered:
+            events.append("timeout")
+            continue
+        if "register_fail" in lowered and "glare" not in lowered:
+            events.append("fail")
+            continue
+    return events
+
+
+def analyze_registration(events):
+    if not events:
+        return False, 0
+    if events[-1] == "ok":
+        return True, 0
+
+    failures = 0
+    for event in reversed(events):
+        if event in {"ok", "startup"}:
+            break
+        if event in {"timeout", "fail"}:
+            failures += 1
+    return False, failures
+
+
+def watchdog_loop():
+    global watchdog_events, watchdog_last_restart, watchdog_log_offset
+
+    while True:
+        time.sleep(WATCHDOG_INTERVAL)
+
+        if time.monotonic() - watchdog_started_at < WATCHDOG_STARTUP_GRACE:
+            continue
+
+        lines, watchdog_log_offset = read_new_lines(SYSTEM_LOG_PATH, watchdog_log_offset)
+        if lines:
+            watchdog_events.extend(parse_registration_events(lines))
+            watchdog_events = watchdog_events[-WATCHDOG_SCAN_LINES:]
+
+        healthy, failure_count = analyze_registration(watchdog_events)
+        if healthy or failure_count < WATCHDOG_FAIL_THRESHOLD:
+            continue
+
+        if time.monotonic() - watchdog_last_restart < WATCHDOG_RESTART_COOLDOWN:
+            continue
+
+        log(
+            "watchdog detected repeated registration failures; "
+            f"restarting container={WATCHDOG_TARGET_CONTAINER} count={failure_count}"
+        )
+        try:
+            ok, detail = docker_restart_container(WATCHDOG_TARGET_CONTAINER)
+        except OSError as exc:
+            log(f"watchdog restart failed: {exc}")
+            continue
+
+        if ok:
+            watchdog_last_restart = time.monotonic()
+            watchdog_events = ["startup"]
+            log(f"watchdog restart requested successfully: {detail}")
+        else:
+            log(f"watchdog restart request failed: {detail}")
 
 
 def log_access(status, caller, reason):
@@ -631,6 +761,13 @@ if __name__ == "__main__":
     log("gatehook starting")
     log(f"access log path: {ACCESS_LOG_PATH}")
     log(f"system log path: {SYSTEM_LOG_PATH}")
+    if WATCHDOG_ENABLED:
+        log(
+            "watchdog enabled: "
+            f"interval={WATCHDOG_INTERVAL}s "
+            f"fail_threshold={WATCHDOG_FAIL_THRESHOLD} "
+            f"cooldown={WATCHDOG_RESTART_COOLDOWN}s"
+        )
     if telegram_enabled():
         log("telegram notifications enabled")
     telegram_init_offset()
@@ -640,4 +777,6 @@ if __name__ == "__main__":
             f"{CTRL_SUBSCRIBE_COMMAND} {CTRL_SUBSCRIBE_PARAMS}".strip()
         )
     touch_log(ACCESS_LOG_PATH)
+    if WATCHDOG_ENABLED:
+        threading.Thread(target=watchdog_loop, daemon=True).start()
     connect_and_run()

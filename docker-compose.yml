@@ -22,6 +22,14 @@ x-gatehook-env: &gatehook_env
   TELEGRAM_CHAT_ID: "${TELEGRAM_CHAT_ID}"
   TELEGRAM_TIMEOUT: "15"
   TELEGRAM_POLL_INTERVAL: "1"
+  WATCHDOG_ENABLED: "1"
+  WATCHDOG_INTERVAL: "30"
+  WATCHDOG_FAIL_THRESHOLD: "3"
+  WATCHDOG_SCAN_LINES: "400"
+  WATCHDOG_STARTUP_GRACE: "180"
+  WATCHDOG_RESTART_COOLDOWN: "600"
+  WATCHDOG_TARGET_CONTAINER: baresip
+  DOCKER_SOCKET_PATH: /var/run/docker.sock
 
 services:
   baresip:
@@ -68,6 +76,7 @@ services:
       <<: *gatehook_env
     volumes:
       - ./scripts:/opt/gatehook:rw
+      - /var/run/docker.sock:/var/run/docker.sock:rw
     working_dir: /opt/gatehook
     healthcheck:
       test:
