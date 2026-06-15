@@ -54,6 +54,57 @@ No container restarts are needed for changes to take effect.
   - `sip:+393331234567@provider`
   - `sip:alice@example.com`
 
+## Admin GUI
+The admin GUI is an optional sidecar service for viewing and editing the
+live-reloaded whitelist files. It does not sit in the call-handling path and
+does not restart `baresip` or `gatehook` when callers are added or removed.
+
+### Start the GUI
+```bash
+docker compose up -d gatehook-admin
+```
+
+By default it listens on host port `18744`:
+
+```text
+http://<server-ip>:18744
+```
+
+To require browser login, set these values in `.env` before exposing it through
+Nginx Proxy Manager:
+
+```bash
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=change-this-password
+```
+
+If you prefer SSH-only access instead of publishing it through a reverse proxy,
+forward that port from your local machine:
+
+```bash
+ssh -L 18744:127.0.0.1:18744 192.168.8.240
+```
+
+### Safe writes and rollback
+- Every add, remove, toggle, or restore operation is serialized with a lock.
+- `whitelist.txt` and `whitelist.enabled` are written through a temporary file
+  and atomically renamed into place.
+- Before each change, the GUI creates timestamped backups in
+  `scripts/backups/`.
+- Newly added callers are timestamped in `scripts/whitelist_meta.json` so the
+  GUI can show how long ago each number was added.
+- To disable the GUI without affecting gate operation:
+
+```bash
+docker compose stop gatehook-admin
+```
+
+Manual restore example:
+
+```bash
+cp scripts/backups/whitelist.txt.<timestamp>.bak scripts/whitelist.txt
+```
+
 ## Healthchecks
 - `baresip` is healthy when ctrl_tcp is accepting connections.
 - `gatehook` is healthy when it can connect to ctrl_tcp.

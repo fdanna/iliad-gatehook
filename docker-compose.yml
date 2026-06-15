@@ -78,3 +78,35 @@ services:
       timeout: 3s
       retries: 3
       start_period: 10s
+  gatehook-admin:
+    build:
+      context: .
+      dockerfile: admin/Dockerfile
+    container_name: gatehook-admin
+    restart: unless-stopped
+    environment:
+      ADMIN_HOST: 0.0.0.0
+      ADMIN_PORT: "18744"
+      WHITELIST_PATH: /opt/gatehook/whitelist.txt
+      WHITELIST_TOGGLE_PATH: /opt/gatehook/whitelist.enabled
+      ACCESS_LOG_PATH: /opt/gatehook/access.log
+      SYSTEM_LOG_PATH: /opt/gatehook/system.log
+      BACKUP_DIR: /opt/gatehook/backups
+      METADATA_PATH: /opt/gatehook/whitelist_meta.json
+      # Optional basic auth. Set these in .env before exposing through a proxy.
+      ADMIN_USERNAME: "${ADMIN_USERNAME:-}"
+      ADMIN_PASSWORD: "${ADMIN_PASSWORD:-}"
+    ports:
+      - "18744:18744"
+    volumes:
+      - ./scripts:/opt/gatehook:rw
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python - <<'PY'\nimport urllib.request\nurllib.request.urlopen('http://127.0.0.1:18744/health', timeout=2).read()\nPY",
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
