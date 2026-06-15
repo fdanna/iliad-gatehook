@@ -321,6 +321,33 @@ HTML = """<!doctype html>
       gap: 16px;
       margin-bottom: 18px;
     }
+    .topbar-actions {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .rome-clock {
+      min-width: 205px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      padding: 8px 10px;
+      text-align: right;
+      box-shadow: 0 6px 18px rgba(20, 30, 40, 0.05);
+    }
+    .rome-clock-label {
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 750;
+      text-transform: uppercase;
+      letter-spacing: .04em;
+    }
+    .rome-clock-value {
+      margin-top: 2px;
+      font-size: 14px;
+      font-weight: 750;
+      color: var(--text);
+    }
     h1 {
       margin: 0;
       font-size: 28px;
@@ -527,6 +554,8 @@ HTML = """<!doctype html>
       aside { display: none; }
       main { padding: 18px; }
       .topbar { align-items: flex-start; flex-direction: column; }
+      .topbar-actions { width: 100%; justify-content: space-between; }
+      .rome-clock { text-align: left; }
       .grid { grid-template-columns: 1fr; }
       .form-grid { grid-template-columns: 1fr; }
       .actions { width: 84px; }
@@ -558,7 +587,13 @@ HTML = """<!doctype html>
           <h1>Phone Whitelist</h1>
           <div class="subtle">Changes are written to the live-reloaded files. No gate service restart is required.</div>
         </div>
-        <button id="refresh">Refresh</button>
+        <div class="topbar-actions">
+          <div class="rome-clock">
+            <div class="rome-clock-label">Rome Time</div>
+            <div class="rome-clock-value" id="rome-clock">-</div>
+          </div>
+          <button id="refresh">Refresh</button>
+        </div>
       </div>
       <div class="grid">
         <section class="panel">
@@ -624,7 +659,7 @@ HTML = """<!doctype html>
                 <table class="access-table">
                   <thead>
                     <tr>
-                      <th>Date/Time</th>
+                      <th>Date/Time (Rome)</th>
                       <th>Phone Number</th>
                       <th class="access-result">Result</th>
                     </tr>
@@ -722,9 +757,43 @@ HTML = """<!doctype html>
       "423": ["🇱🇮", "Liechtenstein"]
     };
     let state = null;
+    const romeFormatter = new Intl.DateTimeFormat("en-GB", {
+      timeZone: "Europe/Rome",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false
+    });
+    const romeLogFormatter = new Intl.DateTimeFormat("en-GB", {
+      timeZone: "Europe/Rome",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false
+    });
 
     function cleanDigits(value) {
-      return String(value || "").replace(/\D/g, "");
+      return String(value || "").replace(/\\D/g, "");
+    }
+
+    function parseLogTimestamp(value) {
+      const normalized = String(value || "").replace(/([+-]\\d{2})(\\d{2})$/, "$1:$2");
+      const parsed = new Date(normalized);
+      return Number.isNaN(parsed.getTime()) ? null : parsed;
+    }
+
+    function formatRomeLogTime(value) {
+      const parsed = parseLogTimestamp(value);
+      return parsed ? romeLogFormatter.format(parsed).replace(",", "") : value;
+    }
+
+    function updateRomeClock() {
+      qs("rome-clock").textContent = romeFormatter.format(new Date()).replace(",", "");
     }
 
     function countryCodeForSubmit() {
@@ -846,7 +915,7 @@ HTML = """<!doctype html>
         for (const item of state.access_entries) {
           const tr = document.createElement("tr");
           const at = document.createElement("td");
-          at.textContent = item.display_time;
+          at.textContent = formatRomeLogTime(item.timestamp || item.display_time);
           const phone = document.createElement("td");
           phone.className = "access-phone";
           phone.textContent = item.phone;
@@ -930,6 +999,8 @@ HTML = """<!doctype html>
     });
 
     qs("refresh").addEventListener("click", refresh);
+    updateRomeClock();
+    setInterval(updateRomeClock, 1000);
     refresh();
   </script>
 </body>
