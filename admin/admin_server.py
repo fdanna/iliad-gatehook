@@ -34,6 +34,7 @@ MAX_CALLER_LENGTH = int(os.environ.get("MAX_CALLER_LENGTH", "256"))
 DEFAULT_SIP_DOMAIN = os.environ.get("DEFAULT_SIP_DOMAIN", "voip.iliad.it")
 DEFAULT_SIP_SUFFIX = os.environ.get("DEFAULT_SIP_SUFFIX", ";user=phone")
 ACCESS_LOG_LIMIT = int(os.environ.get("ACCESS_LOG_LIMIT", "60"))
+LOGO_PATH = Path(os.environ.get("LOGO_PATH", "/opt/gatehook-admin/logo.png"))
 ACCESS_LINE_RE = re.compile(
     r"^(?P<ts>\S+)\s+(?P<status>accepted|rejected)\s+caller=(?P<caller>.*?)\s+reason="
 )
@@ -205,22 +206,24 @@ HTML = """<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Gatehook Admin</title>
+  <title>Gate Access Admin</title>
+  <link rel="icon" href="/favicon.ico" type="image/png">
   <style>
     :root {
       color-scheme: light;
-      --bg: #f6f7f9;
-      --panel: #ffffff;
-      --panel-soft: #f1f4f7;
-      --text: #17202a;
-      --muted: #667281;
-      --line: #d8dde4;
-      --accent: #136f63;
-      --accent-dark: #0f5a51;
+      --bg: #f4efe4;
+      --panel: #fffdf6;
+      --panel-soft: #e9f5f7;
+      --text: #082f3f;
+      --muted: #55717c;
+      --line: #c8d9db;
+      --accent: #187f96;
+      --accent-dark: #083346;
       --danger: #b42318;
       --danger-soft: #fff1f0;
-      --ok-soft: #eaf7f1;
-      --shadow: 0 12px 28px rgba(20, 30, 40, 0.08);
+      --ok-soft: #e7f6f1;
+      --sun: #efe8d6;
+      --shadow: 0 12px 28px rgba(3, 36, 50, 0.12);
       font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     }
     * { box-sizing: border-box; }
@@ -244,7 +247,7 @@ HTML = """<!doctype html>
       cursor: pointer;
       font-weight: 650;
     }
-    button:hover { border-color: #aeb8c4; }
+    button:hover { border-color: #79b8c4; }
     button.primary {
       background: var(--accent);
       border-color: var(--accent);
@@ -254,7 +257,7 @@ HTML = """<!doctype html>
     button.danger {
       color: var(--danger);
       border-color: #f0b8b2;
-      background: #fff;
+      background: var(--panel);
     }
     button:disabled {
       cursor: not-allowed;
@@ -272,7 +275,7 @@ HTML = """<!doctype html>
     }
     input:focus, select:focus {
       border-color: var(--accent);
-      box-shadow: 0 0 0 3px rgba(19, 111, 99, 0.13);
+      box-shadow: 0 0 0 3px rgba(24, 127, 150, 0.16);
     }
     .app {
       display: grid;
@@ -280,14 +283,28 @@ HTML = """<!doctype html>
       min-height: 100vh;
     }
     aside {
-      background: #111820;
-      color: #eef3f6;
+      background: #062b3a;
+      color: #fbf6ea;
       padding: 24px 18px;
     }
     .brand {
-      font-size: 18px;
-      font-weight: 760;
+      display: grid;
+      gap: 12px;
       margin-bottom: 28px;
+    }
+    .brand-logo {
+      width: 100%;
+      aspect-ratio: 1 / 1;
+      object-fit: cover;
+      border: 2px solid rgba(251, 246, 234, .88);
+      border-radius: 8px;
+      background: var(--sun);
+      box-shadow: 0 12px 24px rgba(0, 16, 24, .25);
+    }
+    .brand-title {
+      font-size: 18px;
+      font-weight: 780;
+      line-height: 1.15;
     }
     .status {
       display: grid;
@@ -297,10 +314,10 @@ HTML = """<!doctype html>
       border: 1px solid rgba(255,255,255,.12);
       border-radius: 8px;
       padding: 12px;
-      background: rgba(255,255,255,.04);
+      background: rgba(133, 202, 216, .09);
     }
     .status-label {
-      color: #aeb9c5;
+      color: #bad4db;
       font-size: 12px;
       font-weight: 700;
       text-transform: uppercase;
@@ -565,7 +582,10 @@ HTML = """<!doctype html>
 <body>
   <div class="app">
     <aside>
-      <div class="brand">Gatehook Admin</div>
+      <div class="brand">
+        <img class="brand-logo" src="/assets/logo.png" alt="Sant'Alessio Seaside">
+        <div class="brand-title">Gate Access Admin</div>
+      </div>
       <div class="status">
         <div class="status-item">
           <div class="status-label">Whitelist</div>
@@ -584,7 +604,7 @@ HTML = """<!doctype html>
     <main>
       <div class="topbar">
         <div>
-          <h1>Phone Whitelist</h1>
+          <h1>Gate Access Admin</h1>
           <div class="subtle">Changes are written to the live-reloaded files. No gate service restart is required.</div>
         </div>
         <div class="topbar-actions">
@@ -1388,6 +1408,8 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path == "/health":
             return self.send_json({"ok": True})
+        if parsed.path in {"/assets/logo.png", "/favicon.ico"}:
+            return self.send_png(LOGO_PATH)
         if not self.authorized():
             return self.send_auth_required()
         if parsed.path == "/":
@@ -1398,6 +1420,24 @@ class Handler(BaseHTTPRequestHandler):
             params = parse_qs(parsed.query)
             backup = params.get("backup", [""])[0]
             return self.download_backup(backup)
+        self.send_error(HTTPStatus.NOT_FOUND)
+
+    def do_HEAD(self):
+        parsed = urlparse(self.path)
+        if parsed.path == "/health":
+            return self.send_head_response("application/json; charset=utf-8", len('{\n  "ok": true\n}'))
+        if parsed.path in {"/assets/logo.png", "/favicon.ico"}:
+            try:
+                size = LOGO_PATH.stat().st_size
+            except OSError:
+                return self.send_error(HTTPStatus.NOT_FOUND)
+            return self.send_head_response("image/png", size, cache=True)
+        if not self.authorized():
+            return self.send_auth_required()
+        if parsed.path == "/":
+            return self.send_head_response(
+                "text/html; charset=utf-8", len(HTML.encode("utf-8"))
+            )
         self.send_error(HTTPStatus.NOT_FOUND)
 
     def do_POST(self):
@@ -1443,6 +1483,26 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def send_head_response(self, content_type, content_length, cache=False):
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", content_type)
+        if cache:
+            self.send_header("Cache-Control", "public, max-age=86400")
+        self.send_header("Content-Length", str(content_length))
+        self.end_headers()
+
+    def send_png(self, path):
+        try:
+            body = path.read_bytes()
+        except OSError:
+            return self.send_error(HTTPStatus.NOT_FOUND)
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "image/png")
+        self.send_header("Cache-Control", "public, max-age=86400")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def authorized(self):
         if not ADMIN_USERNAME and not ADMIN_PASSWORD:
             return True
@@ -1458,7 +1518,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def send_auth_required(self):
         self.send_response(HTTPStatus.UNAUTHORIZED)
-        self.send_header("WWW-Authenticate", 'Basic realm="Gatehook Admin"')
+        self.send_header("WWW-Authenticate", 'Basic realm="Gate Access Admin"')
         self.send_header("Content-Length", "0")
         self.end_headers()
 
