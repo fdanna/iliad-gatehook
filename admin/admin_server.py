@@ -1096,22 +1096,65 @@ def country_info_for_phone(phone):
     return {"code": "", "country": "Unknown", "flag": ""}
 
 
+def split_phone_number(value):
+    phone = phone_from_caller(value)
+    explicit_country = True
+    if phone.startswith("+"):
+        digits = phone[1:]
+    elif phone.startswith("00"):
+        digits = phone[2:]
+    else:
+        explicit_country = False
+        digits = phone
+
+    if not digits.isdigit():
+        return "", phone, explicit_country
+
+    if explicit_country:
+        for length in (3, 2, 1):
+            country = digits[:length]
+            if country in COUNTRY_CODES:
+                return country, digits[length:], explicit_country
+        return "", digits, explicit_country
+
+    return "39", digits, explicit_country
+
+
+def normalize_italian_national_number(national):
+    if national.startswith("03"):
+        return national[1:]
+    return national
+
+
 def format_display_phone(phone):
     value = phone.strip()
-    info = country_info_for_phone(value)
-    if value.startswith("+"):
-        digits = value[1:]
-    elif value.startswith("00"):
-        digits = value[2:]
-    else:
-        digits = value
-
-    code = info["code"]
-    if code and digits.startswith(code):
-        national = digits[len(code) :]
-    else:
-        national = digits
+    code, national, explicit_country = split_phone_number(value)
+    if code == "39":
+        national = normalize_italian_national_number(national)
     return f"+{code} {national}" if code else value
+
+
+def caller_key(caller):
+    code, national, explicit_country = split_phone_number(caller)
+    if not code:
+        return phone_from_caller(caller)
+    if code == "39":
+        national = normalize_italian_national_number(national)
+    return f"{code}:{national}"
+
+
+def replace_caller_user(caller, user):
+    value = str(caller or "").strip()
+    prefix = "sip:" if value.startswith("sip:") else ""
+    rest = value[4:] if prefix else value
+    suffix = ""
+    if ";" in rest:
+        rest, suffix = rest.split(";", 1)
+        suffix = ";" + suffix
+    if "@" in rest:
+        _, host = rest.split("@", 1)
+        return f"{prefix}{user}@{host}{suffix}"
+    return f"{prefix}{user}{suffix}"
 
 
 def entry_payload(caller):
@@ -1129,7 +1172,15 @@ def entry_payload(caller):
 def normalize_caller_input(caller):
     value = validate_caller(caller)
     if value.startswith("sip:") or "@" in value:
+        code, national, explicit_country = split_phone_number(value)
+        if code == "39":
+            return replace_caller_user(value, normalize_italian_national_number(national))
         return value
+    code, national, explicit_country = split_phone_number(value)
+    if code == "39":
+        value = normalize_italian_national_number(national)
+    elif value.startswith("+"):
+        value = f"00{value[1:]}"
     return f"sip:{value}@{DEFAULT_SIP_DOMAIN}{DEFAULT_SIP_SUFFIX}"
 
 
@@ -1353,7 +1404,7 @@ def add_caller(caller):
     with write_lock():
         lines = read_lines(WHITELIST_PATH)
         entries = active_entries(lines)
-        if caller in entries:
+        if caller_key(caller) in {caller_key(entry) for entry in entries}:
             raise ValueError("Caller ID is already present.")
         create_backup(WHITELIST_PATH)
         if lines and lines[-1].strip():

@@ -134,13 +134,89 @@ def load_whitelist():
         log(f"whitelist read failed: {exc}")
         return set()
 
-    allowed = set()
+    allowed = {"raw": set(), "keys": set()}
     for raw in lines:
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
-        allowed.add(line)
+        allowed["raw"].add(line)
+        allowed["keys"].add(caller_key(line))
     return allowed
+
+
+def caller_user(caller):
+    value = str(caller or "").strip()
+    if value.startswith("sip:"):
+        value = value[4:]
+    value = value.split(";", 1)[0]
+    if "@" in value:
+        value = value.split("@", 1)[0]
+    return value
+
+
+def split_phone_number(value):
+    phone = caller_user(value)
+    explicit_country = True
+    if phone.startswith("+"):
+        digits = phone[1:]
+    elif phone.startswith("00"):
+        digits = phone[2:]
+    else:
+        explicit_country = False
+        digits = phone
+
+    if not digits.isdigit():
+        return "", phone, explicit_country
+
+    if explicit_country:
+        for length in (3, 2, 1):
+            country = digits[:length]
+            # Only the country codes gatehook needs to distinguish today.
+            if country in {"1", "30", "33", "39", "43", "46", "49", "421"}:
+                return country, digits[length:], explicit_country
+        return "", digits, explicit_country
+
+    return "39", digits, explicit_country
+
+
+def normalize_italian_national_number(national):
+    # Some Iliad caller IDs arrive with an extra leading trunk 0 before
+    # Italian mobile numbers. Italian landlines legitimately start with 0,
+    # so only collapse 03... to 3....
+    if national.startswith("03"):
+        return national[1:]
+    return national
+
+
+def caller_key(caller):
+    country, national, explicit_country = split_phone_number(caller)
+    if not country:
+        return caller_user(caller)
+    if country == "39":
+        national = normalize_italian_national_number(national)
+    return f"{country}:{national}"
+
+
+def normalized_whitelist_caller(caller):
+    country, national, explicit_country = split_phone_number(caller)
+    if country == "39":
+        national = normalize_italian_national_number(national)
+        return replace_caller_user(caller, national)
+    return caller
+
+
+def replace_caller_user(caller, user):
+    value = str(caller or "").strip()
+    prefix = "sip:" if value.startswith("sip:") else ""
+    rest = value[4:] if prefix else value
+    suffix = ""
+    if ";" in rest:
+        rest, suffix = rest.split(";", 1)
+        suffix = ";" + suffix
+    if "@" in rest:
+        _, host = rest.split("@", 1)
+        return f"{prefix}{user}@{host}{suffix}"
+    return f"{prefix}{user}{suffix}"
 
 
 def trigger_shelly():
@@ -301,6 +377,10 @@ def extract_origin(caller):
 
 
 def append_whitelist(caller):
+    caller = normalized_whitelist_caller(caller)
+    allowed = load_whitelist()
+    if allowed is not None and caller_key(caller) in allowed["keys"]:
+        return False
     try:
         with open(WHITELIST_PATH, "a", encoding="utf-8") as handle:
             handle.write(caller + "\n")
@@ -414,7 +494,12 @@ def handle_message(sock, msg):
     last_trigger = now
 
     allowed = load_whitelist()
-    if allowed is not None and caller not in allowed:
+    caller_allowed = (
+        allowed is None
+        or caller in allowed["raw"]
+        or caller_key(caller) in allowed["keys"]
+    )
+    if not caller_allowed:
         log(f"caller not allowed: {caller}")
         if telegram_enabled():
             origin = extract_origin(caller)
