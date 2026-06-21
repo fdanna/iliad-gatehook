@@ -46,8 +46,19 @@ CTRL_PORT = env_int("CTRL_PORT", 4444)
 CTRL_SUBSCRIBE_COMMAND = os.environ.get("CTRL_SUBSCRIBE_COMMAND", "event")
 CTRL_SUBSCRIBE_PARAMS = os.environ.get("CTRL_SUBSCRIBE_PARAMS", "register call")
 
-SHELLY_URL = os.environ.get("SHELLY_URL", "http://192.168.8.159/rpc/Switch.Set")
+SHELLY_HOST = os.environ.get("SHELLY_HOST", "192.168.8.159")
+SHELLY_URL = os.environ.get(
+    "SHELLY_URL", f"http://{SHELLY_HOST}/rpc/Switch.Set"
+)
+SHELLY_INFO_URL = os.environ.get(
+    "SHELLY_INFO_URL", f"http://{SHELLY_HOST}/rpc/Shelly.GetDeviceInfo"
+)
+SHELLY_EXPECTED_ID = os.environ.get(
+    "SHELLY_EXPECTED_ID", "shellypro1-80f3dac96878"
+)
 SHELLY_TIMEOUT = env_float("SHELLY_TIMEOUT", 2.0)
+SHELLY_RETRIES = env_int("SHELLY_RETRIES", 3)
+SHELLY_RETRY_DELAY = env_float("SHELLY_RETRY_DELAY", 0.3)
 
 DEBOUNCE_SECONDS = env_float("DEBOUNCE_SECONDS", 2.0)
 RECONNECT_DELAY = env_float("RECONNECT_DELAY", 2.0)
@@ -76,6 +87,7 @@ WATCHDOG_STARTUP_GRACE = env_float("WATCHDOG_STARTUP_GRACE", 180.0)
 WATCHDOG_RESTART_COOLDOWN = env_float("WATCHDOG_RESTART_COOLDOWN", 600.0)
 WATCHDOG_TARGET_CONTAINER = os.environ.get("WATCHDOG_TARGET_CONTAINER", "baresip")
 DOCKER_SOCKET_PATH = os.environ.get("DOCKER_SOCKET_PATH", "/var/run/docker.sock")
+HEALTH_PATH = os.environ.get("HEALTH_PATH", "/tmp/gatehook-health.json")
 
 
 last_trigger = 0.0
@@ -108,6 +120,20 @@ def touch_log(path):
             pass
     except OSError:
         pass
+
+
+def write_health(ctrl_connected):
+    payload = {
+        "ctrl_connected": bool(ctrl_connected),
+        "updated_at": time.time(),
+    }
+    tmp_path = f"{HEALTH_PATH}.tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle)
+        os.replace(tmp_path, HEALTH_PATH)
+    except OSError as exc:
+        log(f"health state write failed: {exc}")
 
 
 def read_new_lines(path, start_offset):
@@ -393,20 +419,55 @@ def replace_caller_user(caller, user):
     return f"{prefix}{user}{suffix}"
 
 
+def verify_shelly_identity():
+    with urllib.request.urlopen(SHELLY_INFO_URL, timeout=SHELLY_TIMEOUT) as resp:
+        payload = json.loads(resp.read().decode("utf-8", errors="replace"))
+    device_id = payload.get("id") if isinstance(payload, dict) else None
+    if device_id != SHELLY_EXPECTED_ID:
+        raise ValueError(
+            f"unexpected Shelly device id: expected={SHELLY_EXPECTED_ID} actual={device_id}"
+        )
+    return device_id
+
+
 def trigger_shelly():
-    payload = json.dumps({"id": 0, "on": True}).encode("utf-8")
-    req = urllib.request.Request(
-        SHELLY_URL,
-        data=payload,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=SHELLY_TIMEOUT) as resp:
-            body = resp.read().decode("utf-8", errors="replace")
-        log(f"shelly trigger response: status={resp.status} body={body}")
-    except (urllib.error.URLError, urllib.error.HTTPError, OSError) as exc:
-        log(f"shelly trigger failed: {exc}")
+    attempts = max(1, SHELLY_RETRIES)
+    for attempt in range(1, attempts + 1):
+        try:
+            device_id = verify_shelly_identity()
+            payload = json.dumps({"id": 0, "on": True}).encode("utf-8")
+            req = urllib.request.Request(
+                SHELLY_URL,
+                data=payload,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=SHELLY_TIMEOUT) as resp:
+                body = resp.read().decode("utf-8", errors="replace")
+            log(
+                f"shelly trigger response: device={device_id} "
+                f"status={resp.status} body={body}"
+            )
+            return True
+        except (
+            urllib.error.URLError,
+            urllib.error.HTTPError,
+            OSError,
+            ValueError,
+            json.JSONDecodeError,
+        ) as exc:
+            log(f"shelly trigger attempt {attempt}/{attempts} failed: {exc}")
+            if attempt < attempts:
+                time.sleep(SHELLY_RETRY_DELAY)
+    return False
+
+
+def complete_authorized_call(sock, caller, success_reason):
+    if trigger_shelly():
+        log_access("accepted", caller, success_reason)
+    else:
+        log_access("rejected", caller, "shelly_failed")
+    send_hangup(sock)
 
 
 def telegram_enabled():
@@ -689,16 +750,16 @@ def handle_message(sock, msg):
                 choice = telegram_wait_for_decision(request_id, TELEGRAM_TIMEOUT)
                 if choice == "AUTH":
                     log(f"telegram authorized: {caller}")
-                    log_access("accepted", caller, "telegram_authorized")
-                    trigger_shelly()
-                    send_hangup(sock)
+                    complete_authorized_call(
+                        sock, caller, "telegram_authorized"
+                    )
                     return
                 if choice == "AUTH_ADD":
                     added = append_whitelist(caller)
                     log(f"telegram authorized and add: {caller} added={added}")
-                    log_access("accepted", caller, "telegram_authorized_added")
-                    trigger_shelly()
-                    send_hangup(sock)
+                    complete_authorized_call(
+                        sock, caller, "telegram_authorized_added"
+                    )
                     return
                 if choice == "DECLINE":
                     log(f"telegram declined: {caller}")
@@ -718,9 +779,7 @@ def handle_message(sock, msg):
         return
 
     log(f"incoming call from {caller}; triggering shelly")
-    log_access("accepted", caller, "triggered")
-    trigger_shelly()
-    send_hangup(sock)
+    complete_authorized_call(sock, caller, "triggered")
 
 
 def connect_and_run():
@@ -729,12 +788,14 @@ def connect_and_run():
             sock = socket.create_connection((CTRL_HOST, CTRL_PORT), timeout=5)
             sock.settimeout(5)
             log(f"connected to ctrl_tcp at {CTRL_HOST}:{CTRL_PORT}")
+            write_health(True)
             subscribe_events(sock)
             buffer = b""
             while True:
                 try:
                     chunk = sock.recv(RECV_CHUNK)
                 except socket.timeout:
+                    write_health(True)
                     continue
                 if not chunk:
                     raise ConnectionError("ctrl_tcp connection closed")
@@ -748,6 +809,7 @@ def connect_and_run():
                         continue
                     handle_message(sock, msg)
         except (OSError, ConnectionError) as exc:
+            write_health(False)
             log(f"ctrl_tcp connection error: {exc}")
             time.sleep(RECONNECT_DELAY)
         finally:

@@ -1,0 +1,12 @@
+/home/fdanna/docker/baresip/scripts/access.log
+/home/fdanna/docker/baresip/scripts/system.log {
+    daily
+    size 10M
+    rotate 14
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+    su fdanna fdanna
+}

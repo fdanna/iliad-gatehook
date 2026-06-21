@@ -14,8 +14,16 @@ and `x-gatehook-env`. Edit those values and run `docker compose up -d`.
 - `CTRL_PORT` (default `4444`): ctrl_tcp port.
 
 ### Shelly control
-- `SHELLY_URL` (default `http://192.168.8.159/rpc/Switch.Set`): Shelly RPC URL.
+- `SHELLY_HOST` (default `192.168.8.159`): gate Shelly IP, configurable in `.env`.
+- `SHELLY_EXPECTED_ID` (default `shellypro1-80f3dac96878`): device identity
+  that must match before gatehook will activate the relay.
 - `SHELLY_TIMEOUT` (default `2`): HTTP timeout in seconds.
+- `SHELLY_RETRIES` (default `3`): activation attempts for transient failures.
+- `SHELLY_RETRY_DELAY` (default `0.3`): delay between activation attempts.
+
+Reserve `192.168.8.159` for MAC `80:F3:DA:C9:68:7B` in the router DHCP
+configuration. Identity checking prevents a reassigned address from activating
+the wrong Shelly, but the reservation prevents an avoidable gate outage.
 
 ### Gatehook behavior
 - `DEBOUNCE_SECONDS` (default `2.0`): minimum time between triggers.
@@ -115,8 +123,27 @@ cp scripts/backups/whitelist.txt.<timestamp>.bak scripts/whitelist.txt
 ```
 
 ## Healthchecks
-- `baresip` is healthy when ctrl_tcp is accepting connections.
-- `gatehook` is healthy when it can connect to ctrl_tcp.
+- `baresip` is healthy while its process is running. The gatehook watchdog also
+  monitors recurring registration events and restarts baresip after repeated
+  registration failures.
+- `gatehook` is healthy only while its ctrl_tcp heartbeat is fresh and the
+  configured Shelly responds with the expected device ID.
+- All services use `restart: always`, so Docker starts them after host boot and
+  recreates crashed processes.
+- Docker container logs are capped at three 10 MB files per service.
+- `scripts/log_pipe.sh` bounds the shared baresip system log to 20 MB and
+  retains the newest 5 MB when trimming.
+
+Install host-side rotation for the shared access and system logs:
+
+```bash
+sudo cp ops/gatehook-logrotate /etc/logrotate.d/gatehook
+sudo logrotate -d /etc/logrotate.d/gatehook
+```
+
+Power-loss recovery still depends on the physical host or hypervisor being
+configured to boot automatically when power returns. This deployment runs in a
+KVM guest, so configure that VM to start automatically on its hypervisor.
 
 ## Operations
 - Start stack: `docker compose up -d`

@@ -19,6 +19,15 @@ def load_module(name, path):
 
 admin = load_module("admin_server", ROOT / "admin" / "admin_server.py")
 gatehook = load_module("gatehook", ROOT / "scripts" / "gatehook.py")
+healthcheck = load_module("healthcheck", ROOT / "scripts" / "healthcheck.py")
+
+
+def fake_response(payload, status=200):
+    response = mock.MagicMock()
+    response.status = status
+    response.read.return_value = json.dumps(payload).encode("utf-8")
+    response.__enter__.return_value = response
+    return response
 
 
 class AdminExpirationTests(unittest.TestCase):
@@ -117,6 +126,115 @@ class GatehookExpirationTests(unittest.TestCase):
         trigger.assert_not_called()
         hangup.assert_called_once()
         access.assert_called_once_with("rejected", self.caller, "expired")
+
+
+class GateReliabilityTests(unittest.TestCase):
+    def setUp(self):
+        gatehook.SHELLY_RETRIES = 3
+        gatehook.SHELLY_RETRY_DELAY = 0.01
+
+    def test_trigger_verifies_device_identity_before_activation(self):
+        info = fake_response({"id": gatehook.SHELLY_EXPECTED_ID})
+        triggered = fake_response({"was_on": False})
+        with mock.patch.object(
+            gatehook.urllib.request, "urlopen", side_effect=[info, triggered]
+        ) as urlopen:
+            self.assertTrue(gatehook.trigger_shelly())
+
+        self.assertEqual(gatehook.SHELLY_INFO_URL, urlopen.call_args_list[0].args[0])
+        request = urlopen.call_args_list[1].args[0]
+        self.assertEqual(gatehook.SHELLY_URL, request.full_url)
+        self.assertEqual({"id": 0, "on": True}, json.loads(request.data))
+
+    def test_wrong_device_is_never_activated(self):
+        responses = [fake_response({"id": "wrong-device"}) for _ in range(3)]
+        with mock.patch.object(
+            gatehook.urllib.request, "urlopen", side_effect=responses
+        ) as urlopen, mock.patch.object(gatehook.time, "sleep"):
+            self.assertFalse(gatehook.trigger_shelly())
+        self.assertEqual(3, urlopen.call_count)
+        self.assertTrue(
+            all(call.args[0] == gatehook.SHELLY_INFO_URL for call in urlopen.call_args_list)
+        )
+
+    def test_transient_shelly_failure_is_retried(self):
+        with mock.patch.object(
+            gatehook.urllib.request,
+            "urlopen",
+            side_effect=[
+                OSError("temporary failure"),
+                fake_response({"id": gatehook.SHELLY_EXPECTED_ID}),
+                fake_response({"was_on": False}),
+            ],
+        ), mock.patch.object(gatehook.time, "sleep") as sleep:
+            self.assertTrue(gatehook.trigger_shelly())
+        sleep.assert_called_once_with(gatehook.SHELLY_RETRY_DELAY)
+
+    def test_failed_activation_is_not_logged_as_accepted(self):
+        sock = mock.Mock()
+        with mock.patch.object(gatehook, "trigger_shelly", return_value=False), mock.patch.object(
+            gatehook, "log_access"
+        ) as access, mock.patch.object(gatehook, "send_hangup") as hangup:
+            gatehook.complete_authorized_call(sock, "caller", "triggered")
+        access.assert_called_once_with("rejected", "caller", "shelly_failed")
+        hangup.assert_called_once_with(sock)
+
+
+class HealthcheckTests(unittest.TestCase):
+    def test_healthcheck_accepts_fresh_ctrl_and_expected_shelly(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "health.json"
+            path.write_text(
+                json.dumps({"ctrl_connected": True, "updated_at": 100}),
+                encoding="utf-8",
+            )
+            healthcheck.HEALTH_PATH = str(path)
+            healthcheck.check_ctrl_state(now=110)
+        with mock.patch.object(
+            healthcheck.urllib.request,
+            "urlopen",
+            return_value=fake_response({"id": healthcheck.SHELLY_EXPECTED_ID}),
+        ):
+            healthcheck.check_shelly()
+
+    def test_healthcheck_rejects_stale_ctrl_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "health.json"
+            path.write_text(
+                json.dumps({"ctrl_connected": True, "updated_at": 100}),
+                encoding="utf-8",
+            )
+            healthcheck.HEALTH_PATH = str(path)
+            with self.assertRaisesRegex(RuntimeError, "stale"):
+                healthcheck.check_ctrl_state(now=200)
+
+    def test_healthcheck_rejects_wrong_shelly(self):
+        with mock.patch.object(
+            healthcheck.urllib.request,
+            "urlopen",
+            return_value=fake_response({"id": "wrong-device"}),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "wrong Shelly"):
+                healthcheck.check_shelly()
+
+
+class RegistrationWatchdogTests(unittest.TestCase):
+    def test_registration_failures_are_counted_since_last_success(self):
+        events = gatehook.parse_registration_events(
+            [
+                "REGISTER_OK 200 OK",
+                "connection timed out [110]",
+                "REGISTER_FAIL service unavailable",
+            ]
+        )
+        self.assertEqual(["ok", "timeout", "fail"], events)
+        self.assertEqual((False, 2), gatehook.analyze_registration(events))
+
+    def test_registration_success_clears_prior_failures(self):
+        self.assertEqual(
+            (True, 0),
+            gatehook.analyze_registration(["timeout", "fail", "ok"]),
+        )
 
 
 if __name__ == "__main__":

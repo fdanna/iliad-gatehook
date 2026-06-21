@@ -2,12 +2,23 @@ x-ctrl-env: &ctrl_env
   # ctrl_tcp endpoint for gatehook to reach baresip
   CTRL_HOST: 127.0.0.1
   CTRL_PORT: "4444"
+  # Baresip emits call events without a subscription command.
+  CTRL_SUBSCRIBE_COMMAND: ""
+
+x-logging: &default_logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
 
 x-gatehook-env: &gatehook_env
   <<: *ctrl_env
   # Shelly device control
-  SHELLY_URL: http://192.168.8.159/rpc/Switch.Set
+  SHELLY_HOST: "${SHELLY_HOST:-192.168.8.159}"
+  SHELLY_EXPECTED_ID: "${SHELLY_EXPECTED_ID:-shellypro1-80f3dac96878}"
   SHELLY_TIMEOUT: "2"
+  SHELLY_RETRIES: "3"
+  SHELLY_RETRY_DELAY: "0.3"
   # Gatehook behavior
   DEBOUNCE_SECONDS: "2.0"
   RECONNECT_DELAY: "2.0"
@@ -36,7 +47,8 @@ services:
     image: ghcr.io/baresip/docker/baresip:latest
     container_name: baresip
     network_mode: "host"        # best for SIP/IPv6: no NAT, no port mapping
-    restart: unless-stopped
+    restart: always
+    logging: *default_logging
     environment:
       TZ: Europe/Rome
       <<: *ctrl_env
@@ -52,7 +64,7 @@ services:
       [
         "sh",
         "-c",
-        "baresip -v 2>&1 | tee -a /opt/baresip/system.log",
+        "baresip -v 2>&1 | /opt/baresip/log_pipe.sh",
       ]
     healthcheck:
       test:
@@ -71,7 +83,8 @@ services:
       dockerfile: gatehook/Dockerfile
     container_name: gatehook
     network_mode: "host"
-    restart: unless-stopped
+    restart: always
+    logging: *default_logging
     environment:
       <<: *gatehook_env
     volumes:
@@ -82,18 +95,19 @@ services:
       test:
         [
           "CMD-SHELL",
-          "python -c \"import sys; cmd=open('/proc/1/cmdline','rb').read(); sys.exit(0 if b'gatehook.py' in cmd else 1)\"",
+          "python /opt/gatehook/healthcheck.py",
         ]
-      interval: 10s
-      timeout: 3s
+      interval: 15s
+      timeout: 5s
       retries: 3
-      start_period: 10s
+      start_period: 30s
   gatehook-admin:
     build:
       context: .
       dockerfile: admin/Dockerfile
     container_name: gatehook-admin
-    restart: unless-stopped
+    restart: always
+    logging: *default_logging
     environment:
       ADMIN_HOST: 0.0.0.0
       ADMIN_PORT: "18744"
