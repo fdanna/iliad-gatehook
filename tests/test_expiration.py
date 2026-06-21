@@ -118,6 +118,26 @@ class GatehookExpirationTests(unittest.TestCase):
         hangup.assert_called_once()
         access.assert_called_once_with("rejected", self.caller, "expired")
 
+    def test_gate_trigger_resets_relay_before_one_second_pulse(self):
+        response = mock.MagicMock()
+        response.status = 200
+        response.read.return_value = b'{"was_on": false}'
+        response.__enter__.return_value = response
+        with mock.patch.object(
+            gatehook.urllib.request, "urlopen", return_value=response
+        ) as urlopen, mock.patch.object(gatehook.time, "sleep") as sleep:
+            self.assertTrue(gatehook.trigger_shelly())
+
+        self.assertEqual(2, urlopen.call_count)
+        first_request = urlopen.call_args_list[0].args[0]
+        second_request = urlopen.call_args_list[1].args[0]
+        self.assertEqual({"id": 0, "on": False}, json.loads(first_request.data))
+        self.assertEqual(
+            {"id": 0, "on": True, "toggle_after": gatehook.SHELLY_PULSE_SECONDS},
+            json.loads(second_request.data),
+        )
+        sleep.assert_called_once_with(gatehook.SHELLY_RESET_SECONDS)
+
 
 if __name__ == "__main__":
     unittest.main()
