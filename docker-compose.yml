@@ -16,6 +16,7 @@ x-gatehook-env: &gatehook_env
   WHITELIST_ENABLED: "0"
   WHITELIST_PATH: /opt/gatehook/whitelist.txt
   WHITELIST_TOGGLE_PATH: /opt/gatehook/whitelist.enabled
+  METADATA_PATH: /opt/gatehook/whitelist_meta.json
   # Telegram notifications (set in .env)
   TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN}"
   TELEGRAM_CHAT_ID: "${TELEGRAM_CHAT_ID}"

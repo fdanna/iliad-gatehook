@@ -26,6 +26,8 @@ and `x-gatehook-env`. Edit those values and run `docker compose up -d`.
 - `WHITELIST_ENABLED` (default `0`): fallback if toggle file is missing/invalid.
 - `WHITELIST_PATH` (default `/opt/gatehook/whitelist.txt`): allow-list file path.
 - `WHITELIST_TOGGLE_PATH` (default `/opt/gatehook/whitelist.enabled`): on/off file.
+- `METADATA_PATH` (default `/opt/gatehook/whitelist_meta.json`): caller metadata,
+  including optional expiration dates.
 
 ### Telegram authorization
 - `TELEGRAM_BOT_TOKEN`: bot token (set in `.env`, never commit).
@@ -93,6 +95,13 @@ ssh -L 18744:127.0.0.1:18744 192.168.8.240
   `scripts/backups/`.
 - Newly added callers are timestamped in `scripts/whitelist_meta.json` so the
   GUI can show how long ago each number was added.
+- Automatic expiration can be enabled while adding a caller or later from the
+  Allowed Callers table. Expiring callers are shown in a separate table with
+  their expiration date, remaining days, and current status.
+- Expiration dates use Rome local time and remain valid through the selected
+  date. After that date, gatehook rejects the caller with reason `expired`, and
+  the GUI keeps the entry visible in gray until it is edited, disabled, or
+  removed.
 - To disable the GUI without affecting gate operation:
 
 ```bash

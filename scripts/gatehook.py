@@ -6,6 +6,8 @@ import time
 import urllib.error
 import urllib.request
 import urllib.parse
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 def env_bool(name, default=False):
     raw = os.environ.get(name)
@@ -55,6 +57,9 @@ WHITELIST_PATH = os.environ.get("WHITELIST_PATH", "/opt/gatehook/whitelist.txt")
 WHITELIST_TOGGLE_PATH = os.environ.get(
     "WHITELIST_TOGGLE_PATH", "/opt/gatehook/whitelist.enabled"
 )
+METADATA_PATH = os.environ.get(
+    "METADATA_PATH", "/opt/gatehook/whitelist_meta.json"
+)
 SYSTEM_LOG_PATH = os.environ.get("SYSTEM_LOG_PATH", "/opt/gatehook/system.log")
 ACCESS_LOG_PATH = os.environ.get("ACCESS_LOG_PATH", "/opt/gatehook/access.log")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
@@ -66,6 +71,7 @@ TELEGRAM_API_BASE = os.environ.get("TELEGRAM_API_BASE", "https://api.telegram.or
 
 last_trigger = 0.0
 telegram_update_offset = None
+ROME_TZ = ZoneInfo("Europe/Rome")
 
 
 def log(message):
@@ -142,6 +148,44 @@ def load_whitelist():
         allowed["raw"].add(line)
         allowed["keys"].add(caller_key(line))
     return allowed
+
+
+def load_expiration_metadata():
+    try:
+        with open(METADATA_PATH, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except FileNotFoundError:
+        return {}
+    except (OSError, json.JSONDecodeError) as exc:
+        log(f"whitelist metadata read failed: {exc}")
+        return {}
+
+    entries = payload.get("entries", {}) if isinstance(payload, dict) else {}
+    return entries if isinstance(entries, dict) else {}
+
+
+def expiration_for_caller(caller):
+    metadata = load_expiration_metadata()
+    entry = metadata.get(caller)
+    if not isinstance(entry, dict):
+        target_key = caller_key(caller)
+        for stored_caller, stored_entry in metadata.items():
+            if caller_key(stored_caller) == target_key and isinstance(stored_entry, dict):
+                entry = stored_entry
+                break
+    if not isinstance(entry, dict) or not entry.get("expiration_enabled"):
+        return None
+
+    expires_on = entry.get("expires_on")
+    try:
+        expiry_date = datetime.strptime(str(expires_on), "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        log(f"invalid expiration date for caller {caller}: {expires_on}")
+        return None
+    return {
+        "expires_on": expires_on,
+        "expired": datetime.now(ROME_TZ).date() > expiry_date,
+    }
 
 
 def caller_user(caller):
@@ -492,6 +536,13 @@ def handle_message(sock, msg):
         return
 
     last_trigger = now
+
+    expiration = expiration_for_caller(caller)
+    if expiration and expiration["expired"]:
+        log(f"caller access expired on {expiration['expires_on']}: {caller}")
+        log_access("rejected", caller, "expired")
+        send_hangup(sock)
+        return
 
     allowed = load_whitelist()
     caller_allowed = (

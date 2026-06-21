@@ -10,10 +10,12 @@ import shutil
 import tempfile
 import time
 from calendar import timegm
+from datetime import datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
+from zoneinfo import ZoneInfo
 
 
 HOST = os.environ.get("ADMIN_HOST", "127.0.0.1")
@@ -38,6 +40,7 @@ LOGO_PATH = Path(os.environ.get("LOGO_PATH", "/opt/gatehook-admin/logo.png"))
 ACCESS_LINE_RE = re.compile(
     r"^(?P<ts>\S+)\s+(?P<status>accepted|rejected)\s+caller=(?P<caller>.*?)\s+reason="
 )
+ROME_TZ = ZoneInfo("Europe/Rome")
 
 
 COUNTRY_CODES = {
@@ -381,6 +384,7 @@ HTML = """<!doctype html>
       gap: 18px;
       align-items: start;
     }
+    .grid > *, .stack, .panel { min-width: 0; }
     .panel {
       background: var(--panel);
       border: 1px solid var(--line);
@@ -405,7 +409,7 @@ HTML = """<!doctype html>
     }
     .form-grid {
       display: grid;
-      grid-template-columns: 130px minmax(210px, 280px) auto;
+      grid-template-columns: 120px minmax(180px, 1fr) minmax(150px, 190px) auto;
       gap: 10px;
       align-items: start;
       margin-bottom: 14px;
@@ -467,18 +471,68 @@ HTML = """<!doctype html>
       font-size: 19px;
     }
     .country {
-      width: 150px;
+      width: 125px;
       font-size: 19px;
     }
     .added {
-      width: 120px;
+      width: 100px;
       font-size: 14px;
       color: var(--muted);
     }
     .actions {
-      width: 94px;
+      width: 200px;
       text-align: right;
     }
+    .action-buttons {
+      display: flex;
+      justify-content: flex-end;
+      gap: 4px;
+    }
+    .action-buttons button { padding: 0 6px; }
+    .expiry-option {
+      display: grid;
+      gap: 6px;
+    }
+    .checkbox-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 18px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: uppercase;
+    }
+    .checkbox-row input {
+      width: 16px;
+      min-height: 16px;
+      margin: 0;
+      accent-color: var(--accent);
+    }
+    .expired-row {
+      background: #e4e7e9;
+      color: #737b80;
+    }
+    .expired-row .caller,
+    .expired-row .added { color: #737b80; }
+    .expiry-date { width: 110px; }
+    .days-left { width: 82px; font-weight: 700; }
+    .expiry-status { width: 74px; font-weight: 750; }
+    .expiring-table .caller { font-size: 15px; }
+    .expiry-status.expired { color: #737b80; }
+    .expiry-status.active { color: #146c43; }
+    dialog {
+      width: min(420px, calc(100vw - 32px));
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      color: var(--text);
+      padding: 0;
+      box-shadow: var(--shadow);
+    }
+    dialog::backdrop { background: rgba(6, 43, 58, .45); }
+    .dialog-body { display: grid; gap: 16px; padding: 18px; }
+    .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; }
     .empty {
       color: var(--muted);
       padding: 22px 8px;
@@ -575,7 +629,9 @@ HTML = """<!doctype html>
       .rome-clock { text-align: left; }
       .grid { grid-template-columns: 1fr; }
       .form-grid { grid-template-columns: 1fr; }
-      .actions { width: 84px; }
+      .actions { width: 160px; }
+      .table-scroll { overflow-x: auto; }
+      .table-scroll table { min-width: 720px; }
     }
   </style>
 </head>
@@ -594,6 +650,10 @@ HTML = """<!doctype html>
         <div class="status-item">
           <div class="status-label">Allowed Callers</div>
           <div class="status-value" id="side-count">0</div>
+        </div>
+        <div class="status-item">
+          <div class="status-label">Expiring</div>
+          <div class="status-value" id="side-expiring">0</div>
         </div>
         <div class="status-item">
           <div class="status-label">Backups</div>
@@ -616,7 +676,8 @@ HTML = """<!doctype html>
         </div>
       </div>
       <div class="grid">
-        <section class="panel">
+        <div class="stack">
+          <section class="panel">
           <div class="panel-head">
             <h2>Allowed Callers</h2>
             <div class="message" id="message"></div>
@@ -635,9 +696,16 @@ HTML = """<!doctype html>
                 <input id="phone-number" name="phone-number" autocomplete="off" inputmode="tel" maxlength="14" placeholder="3331234567">
                 <span class="phone-meta" id="phone-meta">Up to 13 digits</span>
               </label>
+              <div class="expiry-option">
+                <label class="checkbox-row">
+                  <input id="expiration-enabled" type="checkbox">
+                  Auto-expire
+                </label>
+                <input id="expiration-date" type="date" aria-label="Expiration date" disabled>
+              </div>
               <button class="primary" type="submit">Add</button>
             </form>
-            <table>
+            <div class="table-scroll"><table>
               <thead>
                 <tr>
                   <th>Phone Number</th>
@@ -647,9 +715,30 @@ HTML = """<!doctype html>
                 </tr>
               </thead>
               <tbody id="entries"></tbody>
-            </table>
+            </table></div>
           </div>
-        </section>
+          </section>
+          <section class="panel">
+            <div class="panel-head">
+              <h2>Expiring Callers</h2>
+              <div class="subtle">Access remains active through the expiration date.</div>
+            </div>
+            <div class="panel-body table-scroll">
+              <table class="expiring-table">
+                <thead>
+                  <tr>
+                    <th>Phone Number</th>
+                    <th class="expiry-date">Expiration</th>
+                    <th class="days-left">Days Left</th>
+                    <th class="expiry-status">Status</th>
+                    <th class="actions">Action</th>
+                  </tr>
+                </thead>
+                <tbody id="expiring-entries"></tbody>
+              </table>
+            </div>
+          </section>
+        </div>
         <div class="stack">
           <section class="panel">
             <div class="panel-head"><h2>Whitelist Control</h2></div>
@@ -695,6 +784,22 @@ HTML = """<!doctype html>
       </div>
     </main>
   </div>
+  <dialog id="expiration-dialog">
+    <form class="dialog-body" id="expiration-form" method="dialog">
+      <div>
+        <h2>Set Expiration</h2>
+        <div class="subtle" id="expiration-caller"></div>
+      </div>
+      <label>
+        Expiration Date
+        <input id="dialog-expiration-date" type="date" required>
+      </label>
+      <div class="dialog-actions">
+        <button type="button" id="expiration-cancel">Cancel</button>
+        <button class="primary" type="submit">Save</button>
+      </div>
+    </form>
+  </dialog>
   <script>
     const qs = (id) => document.getElementById(id);
     const countryLookup = {
@@ -871,7 +976,8 @@ HTML = """<!doctype html>
     function render(next) {
       state = next;
       qs("side-enabled").textContent = state.whitelist_enabled ? "On" : "Off";
-      qs("side-count").textContent = state.entries.length;
+      qs("side-count").textContent = state.entries.length + state.expiring_entries.length;
+      qs("side-expiring").textContent = state.expiring_entries.length;
       qs("side-backups").textContent = state.backups.length;
       qs("enabled-text").textContent = state.whitelist_enabled ? "Whitelist enabled" : "Whitelist disabled";
       qs("toggle").classList.toggle("on", state.whitelist_enabled);
@@ -904,9 +1010,61 @@ HTML = """<!doctype html>
           btn.type = "button";
           btn.textContent = "Remove";
           btn.addEventListener("click", () => removeCaller(raw, display));
-          action.appendChild(btn);
+          const expiryBtn = document.createElement("button");
+          expiryBtn.type = "button";
+          expiryBtn.textContent = "Set expiry";
+          expiryBtn.addEventListener("click", () => openExpirationDialog(raw, display));
+          const buttons = document.createElement("div");
+          buttons.className = "action-buttons";
+          buttons.append(expiryBtn, btn);
+          action.appendChild(buttons);
           tr.append(caller, country, added, action);
           tbody.appendChild(tr);
+        }
+      }
+
+      const expiringBody = qs("expiring-entries");
+      expiringBody.innerHTML = "";
+      if (!state.expiring_entries.length) {
+        expiringBody.innerHTML = `<tr><td class="empty" colspan="5">No caller IDs have automatic expiration enabled.</td></tr>`;
+      } else {
+        for (const entry of state.expiring_entries) {
+          const expiry = entry.expiration;
+          const tr = document.createElement("tr");
+          tr.classList.toggle("expired-row", expiry.expired);
+          const caller = document.createElement("td");
+          caller.className = "caller";
+          caller.textContent = entry.display;
+          const date = document.createElement("td");
+          date.className = "expiry-date";
+          date.textContent = expiry.expires_on;
+          const days = document.createElement("td");
+          days.className = "days-left";
+          days.textContent = expiry.expired ? "-" : (expiry.days_left === 0 ? "Today" : `${expiry.days_left} days`);
+          const status = document.createElement("td");
+          status.className = `expiry-status ${expiry.expired ? "expired" : "active"}`;
+          status.textContent = expiry.status;
+          const action = document.createElement("td");
+          action.className = "actions";
+          const editBtn = document.createElement("button");
+          editBtn.type = "button";
+          editBtn.textContent = "Edit";
+          editBtn.addEventListener("click", () => openExpirationDialog(entry.raw, entry.display, expiry.expires_on));
+          const disableBtn = document.createElement("button");
+          disableBtn.type = "button";
+          disableBtn.textContent = "Disable";
+          disableBtn.addEventListener("click", () => disableExpiration(entry.raw));
+          const removeBtn = document.createElement("button");
+          removeBtn.className = "danger";
+          removeBtn.type = "button";
+          removeBtn.textContent = "Remove";
+          removeBtn.addEventListener("click", () => removeCaller(entry.raw, entry.display));
+          const buttons = document.createElement("div");
+          buttons.className = "action-buttons";
+          buttons.append(editBtn, disableBtn, removeBtn);
+          action.appendChild(buttons);
+          tr.append(caller, date, days, status, action);
+          expiringBody.appendChild(tr);
         }
       }
 
@@ -967,13 +1125,35 @@ HTML = """<!doctype html>
       }
     }
 
+    function openExpirationDialog(caller, display, expiresOn = "") {
+      qs("expiration-form").dataset.caller = caller;
+      qs("expiration-caller").textContent = display || caller;
+      qs("dialog-expiration-date").value = expiresOn || qs("expiration-date").min;
+      qs("expiration-dialog").showModal();
+    }
+
+    async function disableExpiration(caller) {
+      try {
+        render(await api("/api/expiration", {
+          method: "POST",
+          body: JSON.stringify({ caller, enabled: false })
+        }));
+        setMessage("Automatic expiration disabled.", "ok");
+      } catch (err) {
+        setMessage(err.message, "error");
+      }
+    }
+
     qs("add-form").addEventListener("submit", async (event) => {
       event.preventDefault();
       const caller = buildCallerInput();
+      const expiresOn = qs("expiration-enabled").checked ? qs("expiration-date").value : null;
       try {
-        render(await api("/api/add", { method: "POST", body: JSON.stringify({ caller }) }));
+        render(await api("/api/add", { method: "POST", body: JSON.stringify({ caller, expires_on: expiresOn }) }));
         qs("phone-number").value = "";
         qs("country-code").value = "39";
+        qs("expiration-enabled").checked = false;
+        qs("expiration-date").disabled = true;
         updateCountryPreview({ defaultEmpty: true });
         setMessage("Caller added. Backup created.", "ok");
       } catch (err) {
@@ -988,7 +1168,36 @@ HTML = """<!doctype html>
       updateCountryPreview({ defaultEmpty: true });
     });
     qs("phone-number").addEventListener("focus", updateCountryPreview);
+    const today = new Intl.DateTimeFormat("en-CA", {
+      timeZone: "Europe/Rome", year: "numeric", month: "2-digit", day: "2-digit"
+    }).format(new Date());
+    qs("expiration-date").min = today;
+    qs("expiration-date").value = today;
+    qs("dialog-expiration-date").min = today;
+    qs("expiration-enabled").addEventListener("change", () => {
+      qs("expiration-date").disabled = !qs("expiration-enabled").checked;
+      qs("expiration-date").required = qs("expiration-enabled").checked;
+    });
     updateCountryPreview({ defaultEmpty: true });
+
+    qs("expiration-cancel").addEventListener("click", () => qs("expiration-dialog").close());
+    qs("expiration-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      try {
+        render(await api("/api/expiration", {
+          method: "POST",
+          body: JSON.stringify({
+            caller: event.currentTarget.dataset.caller,
+            enabled: true,
+            expires_on: qs("dialog-expiration-date").value
+          })
+        }));
+        qs("expiration-dialog").close();
+        setMessage("Expiration updated.", "ok");
+      } catch (err) {
+        setMessage(err.message, "error");
+      }
+    });
 
     qs("toggle").addEventListener("click", async () => {
       try {
@@ -1157,7 +1366,27 @@ def replace_caller_user(caller, user):
     return f"{prefix}{user}{suffix}"
 
 
-def entry_payload(caller):
+def expiration_details(caller, metadata=None):
+    metadata = load_metadata() if metadata is None else metadata
+    entry = metadata.get(caller, {})
+    if not isinstance(entry, dict) or not entry.get("expiration_enabled"):
+        return None
+    expires_on = entry.get("expires_on")
+    try:
+        expiry_date = datetime.strptime(str(expires_on), "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return None
+    days_left = (expiry_date - datetime.now(ROME_TZ).date()).days
+    return {
+        "enabled": True,
+        "expires_on": expires_on,
+        "days_left": max(0, days_left),
+        "expired": days_left < 0,
+        "status": "Expired" if days_left < 0 else "Active",
+    }
+
+
+def entry_payload(caller, metadata=None):
     phone = phone_from_caller(caller)
     country = country_info_for_phone(phone)
     country_display = f"{country['flag']} {country['country']}".strip()
@@ -1166,6 +1395,7 @@ def entry_payload(caller):
         "display": format_display_phone(phone),
         "country": country_display,
         "added": added_label(caller),
+        "expiration": expiration_details(caller, metadata),
     }
 
 
@@ -1284,12 +1514,15 @@ def added_label(caller):
     return f"{days} days ago"
 
 
-def mark_added(caller):
+def mark_added(caller, expires_on=None):
     metadata = load_metadata()
     existing = metadata.get(caller, {})
     if not isinstance(existing, dict):
         existing = {}
     existing.setdefault("added_at", utc_now_iso())
+    if expires_on:
+        existing["expiration_enabled"] = True
+        existing["expires_on"] = validate_expiration_date(expires_on)
     metadata[caller] = existing
     write_metadata(metadata)
 
@@ -1314,6 +1547,15 @@ def reconcile_metadata(active_callers):
 
     if changed or not metadata_exists:
         write_metadata(metadata)
+
+
+def validate_expiration_date(value):
+    value = str(value or "").strip()
+    try:
+        datetime.strptime(value, "%Y-%m-%d")
+    except ValueError as exc:
+        raise ValueError("Expiration date must use YYYY-MM-DD.") from exc
+    return value
 
 
 @contextlib.contextmanager
@@ -1388,9 +1630,12 @@ def state():
     lines = read_lines(WHITELIST_PATH)
     entries = active_entries(lines)
     reconcile_metadata(entries)
+    metadata = load_metadata()
+    payloads = [entry_payload(entry, metadata) for entry in entries]
     return {
         "whitelist_enabled": parse_bool_file(WHITELIST_TOGGLE_PATH),
-        "entries": [entry_payload(entry) for entry in entries],
+        "entries": [entry for entry in payloads if not entry["expiration"]],
+        "expiring_entries": [entry for entry in payloads if entry["expiration"]],
         "backups": list_backups(),
         "access_entries": parse_access_log(ACCESS_LOG_PATH, ACCESS_LOG_LIMIT),
         "logs": {
@@ -1399,7 +1644,7 @@ def state():
     }
 
 
-def add_caller(caller):
+def add_caller(caller, expires_on=None):
     caller = normalize_caller_input(caller)
     with write_lock():
         lines = read_lines(WHITELIST_PATH)
@@ -1412,7 +1657,7 @@ def add_caller(caller):
         else:
             lines = lines + [caller]
         atomic_write(WHITELIST_PATH, "\n".join(lines).rstrip() + "\n")
-        mark_added(caller)
+        mark_added(caller, expires_on)
     return state()
 
 
@@ -1426,6 +1671,29 @@ def remove_caller(caller):
         create_backup(WHITELIST_PATH)
         atomic_write(WHITELIST_PATH, "\n".join(next_lines).rstrip() + "\n")
         remove_metadata(caller)
+    return state()
+
+
+def set_expiration(caller, enabled, expires_on=None):
+    caller = validate_caller(caller)
+    with write_lock():
+        entries = active_entries(read_lines(WHITELIST_PATH))
+        if caller not in entries:
+            raise ValueError("Caller ID was not found.")
+        metadata = load_metadata()
+        entry = metadata.get(caller, {})
+        if not isinstance(entry, dict):
+            entry = {}
+        entry.setdefault("added_at", utc_now_iso())
+        if enabled:
+            entry["expiration_enabled"] = True
+            entry["expires_on"] = validate_expiration_date(expires_on)
+        else:
+            entry["expiration_enabled"] = False
+            entry.pop("expires_on", None)
+        metadata[caller] = entry
+        create_backup(METADATA_PATH)
+        write_metadata(metadata)
     return state()
 
 
@@ -1497,11 +1765,19 @@ class Handler(BaseHTTPRequestHandler):
         try:
             payload = self.read_json()
             if self.path == "/api/add":
-                return self.send_json(add_caller(payload.get("caller")))
+                return self.send_json(add_caller(payload.get("caller"), payload.get("expires_on")))
             if self.path == "/api/remove":
                 return self.send_json(remove_caller(payload.get("caller")))
             if self.path == "/api/toggle":
                 return self.send_json(set_toggle(bool(payload.get("enabled"))))
+            if self.path == "/api/expiration":
+                return self.send_json(
+                    set_expiration(
+                        payload.get("caller"),
+                        bool(payload.get("enabled")),
+                        payload.get("expires_on"),
+                    )
+                )
             if self.path == "/api/restore":
                 return self.send_json(restore_backup(payload.get("backup")))
             self.send_error(HTTPStatus.NOT_FOUND)
