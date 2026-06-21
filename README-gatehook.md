@@ -14,10 +14,8 @@ and `x-gatehook-env`. Edit those values and run `docker compose up -d`.
 - `CTRL_PORT` (default `4444`): ctrl_tcp port.
 
 ### Shelly control
-- `SHELLY_URL` (default `http://192.168.2.35/rpc/Switch.Set`): Shelly RPC URL.
+- `SHELLY_URL` (default `http://192.168.8.159/rpc/Switch.Set`): Shelly RPC URL.
 - `SHELLY_TIMEOUT` (default `2`): HTTP timeout in seconds.
-- `SHELLY_PULSE_SECONDS` (default `1`): seconds before Shelly releases the gate relay.
-- `SHELLY_RESET_SECONDS` (default `0.15`): pause after clearing a previously latched relay.
 
 ### Gatehook behavior
 - `DEBOUNCE_SECONDS` (default `2.0`): minimum time between triggers.
@@ -148,7 +146,7 @@ docker compose exec gatehook \
 import json
 import urllib.request
 req = urllib.request.Request(
-    "http://192.168.2.35/rpc/Switch.Set",
+    "http://192.168.8.159/rpc/Switch.Set",
     data=json.dumps({"id": 0, "on": True}).encode("utf-8"),
     headers={"Content-Type": "application/json"},
     method="POST",

@@ -6,10 +6,8 @@ x-ctrl-env: &ctrl_env
 x-gatehook-env: &gatehook_env
   <<: *ctrl_env
   # Shelly device control
-  SHELLY_URL: http://192.168.2.35/rpc/Switch.Set
+  SHELLY_URL: http://192.168.8.159/rpc/Switch.Set
   SHELLY_TIMEOUT: "2"
-  SHELLY_PULSE_SECONDS: "1"
-  SHELLY_RESET_SECONDS: "0.15"
   # Gatehook behavior
   DEBOUNCE_SECONDS: "2.0"
   RECONNECT_DELAY: "2.0"

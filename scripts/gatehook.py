@@ -45,10 +45,8 @@ CTRL_PORT = env_int("CTRL_PORT", 4444)
 CTRL_SUBSCRIBE_COMMAND = os.environ.get("CTRL_SUBSCRIBE_COMMAND", "event")
 CTRL_SUBSCRIBE_PARAMS = os.environ.get("CTRL_SUBSCRIBE_PARAMS", "register call")
 
-SHELLY_URL = os.environ.get("SHELLY_URL", "http://192.168.2.35/rpc/Switch.Set")
+SHELLY_URL = os.environ.get("SHELLY_URL", "http://192.168.8.159/rpc/Switch.Set")
 SHELLY_TIMEOUT = env_float("SHELLY_TIMEOUT", 2.0)
-SHELLY_PULSE_SECONDS = env_float("SHELLY_PULSE_SECONDS", 1.0)
-SHELLY_RESET_SECONDS = env_float("SHELLY_RESET_SECONDS", 0.15)
 
 DEBOUNCE_SECONDS = env_float("DEBOUNCE_SECONDS", 2.0)
 RECONNECT_DELAY = env_float("RECONNECT_DELAY", 2.0)
@@ -265,11 +263,8 @@ def replace_caller_user(caller, user):
     return f"{prefix}{user}{suffix}"
 
 
-def shelly_set(on, toggle_after=None):
-    body = {"id": 0, "on": on}
-    if toggle_after is not None:
-        body["toggle_after"] = toggle_after
-    payload = json.dumps(body).encode("utf-8")
+def trigger_shelly():
+    payload = json.dumps({"id": 0, "on": True}).encode("utf-8")
     req = urllib.request.Request(
         SHELLY_URL,
         data=payload,
@@ -278,20 +273,10 @@ def shelly_set(on, toggle_after=None):
     )
     try:
         with urllib.request.urlopen(req, timeout=SHELLY_TIMEOUT) as resp:
-            response_body = resp.read().decode("utf-8", errors="replace")
-        log(f"shelly set on={on} response: status={resp.status} body={response_body}")
-        return True
+            body = resp.read().decode("utf-8", errors="replace")
+        log(f"shelly trigger response: status={resp.status} body={body}")
     except (urllib.error.URLError, urllib.error.HTTPError, OSError) as exc:
-        log(f"shelly set on={on} failed: {exc}")
-        return False
-
-
-def trigger_shelly():
-    # Generate a fresh contact edge even if the relay was left on previously.
-    if not shelly_set(False):
-        return False
-    time.sleep(SHELLY_RESET_SECONDS)
-    return shelly_set(True, toggle_after=SHELLY_PULSE_SECONDS)
+        log(f"shelly trigger failed: {exc}")
 
 
 def telegram_enabled():
